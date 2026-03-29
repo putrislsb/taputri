@@ -1,0 +1,24 @@
+{
+  "rules": {
+    "device": {
+      "RIM_ROOM-01": {
+        "telemetry": {
+          ".read": true,
+          ".write": true
+        },
+        "logs": {
+          ".read": true,
+          ".write": true
+        },
+        "config": {
+          ".read": true,
+          ".write": true
+        },
+        "lastSeen": {
+          ".read": true,
+          ".write": true
+        }
+      }
+    }
+  }
+}
