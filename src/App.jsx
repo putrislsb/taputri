@@ -1,6 +1,8 @@
 import React, { useEffect, useRef } from "react";
 import { db } from "./firebase";
 import { ref, onValue, get, set, push } from "firebase/database";
+import { trainC45, treeToText, treeToRules } from "./lib/c45";
+import TRAINING_DATA, { getDatasetStats } from "./lib/fireTrainingData";
 
 function App() {
   const handlersRef = useRef({});
@@ -19,6 +21,16 @@ function App() {
     let lastPushToLogs = 0;
     let historyPage = 1;
     let lastChartMinute = ""; // untuk grafik per menit
+
+    // ─── C4.5 Decision Tree Model ───────────────────
+    let c45Model = null;
+    let lastC45Result = null;
+    try {
+      c45Model = trainC45(TRAINING_DATA, { maxDepth: 8, minSamples: 2 });
+      console.log("[C4.5] Model berhasil di-train.", c45Model.stats);
+    } catch (err) {
+      console.error("[C4.5] Gagal melatih model:", err);
+    }
     const HISTORY_PAGE_SIZE = 10;
 
     let sensorConfig = {
@@ -291,23 +303,34 @@ function App() {
       const flameRaw = Number(flame);
       const flamePctRaw = raw.flame_pct != null && !Number.isNaN(Number(raw.flame_pct)) ? Number(raw.flame_pct) : null;
       const flamePct = flamePctRaw != null ? flamePctRaw : (!Number.isNaN(flameRaw) && flameRaw >= 0 && flameRaw <= 4095 ? ((4095 - flameRaw) / 4095) * 100 : 0);
-      const flameDangerPct = sensorConfig.flameDangerPct ?? 10;
-      const warnTemp = (sensorConfig.tempDanger ?? 50) * 0.85;
-      const warnGas = (sensorConfig.gasDanger ?? 800) * 0.85;
-      const warnFlamePct = flameDangerPct * 0.85;
 
+      // ═══════════════════════════════════════════════════
+      //  KLASIFIKASI MENGGUNAKAN ALGORITMA C4.5
+      // ═══════════════════════════════════════════════════
       let statusMode = "AMAN";
+
       if (raw.status === "DANGER" || raw.status === "SAFE" || raw.status === "WARNING") {
+        // Jika device sudah mengirim status langsung
         statusMode = raw.status === "DANGER" ? "BAHAYA" : raw.status === "WARNING" ? "WASPADA" : "AMAN";
+      } else if (c45Model) {
+        // Klasifikasi C4.5 — menggantikan logika if-else sederhana
+        const sensorInput = {
+          temp: !Number.isNaN(tempNum) ? tempNum : 25,
+          hum: !Number.isNaN(Number(hum)) ? Number(hum) : 60,
+          gas: !Number.isNaN(gasNum) ? gasNum : 100,
+          flame: !Number.isNaN(flameRaw) ? flameRaw : 4000,
+        };
+        try {
+          lastC45Result = c45Model.classify(sensorInput);
+          statusMode = lastC45Result.class;
+          updateC45Panel(sensorInput, lastC45Result);
+        } catch (e) {
+          console.warn("[C4.5] Klasifikasi gagal, fallback ke threshold:", e);
+          statusMode = fallbackClassify(tempNum, gasNum, flamePct);
+        }
       } else {
-        const bahaya = (!Number.isNaN(tempNum) && tempNum >= (sensorConfig.tempDanger ?? 50)) ||
-          (!Number.isNaN(gasNum) && gasNum >= (sensorConfig.gasDanger ?? 800)) ||
-          (flamePct >= flameDangerPct);
-        const waspada = (!Number.isNaN(tempNum) && tempNum >= warnTemp) ||
-          (!Number.isNaN(gasNum) && gasNum >= warnGas) ||
-          (flamePct >= warnFlamePct);
-        if (bahaya) statusMode = "BAHAYA";
-        else if (waspada) statusMode = "WASPADA";
+        // Fallback jika model C4.5 gagal di-train
+        statusMode = fallbackClassify(tempNum, gasNum, flamePct);
       }
 
       const statusEl = document.getElementById("side-status");
@@ -330,6 +353,228 @@ function App() {
           "text-[11px] font-black " +
           (statusMode === "WASPADA" ? "text-amber-500" : "text-emerald-600") +
           " uppercase mt-0.5";
+      }
+    }
+
+    // Fallback klasifikasi sederhana jika C4.5 gagal
+    function fallbackClassify(tempNum, gasNum, flamePct) {
+      const flameDangerPct = sensorConfig.flameDangerPct ?? 10;
+      const warnTemp = (sensorConfig.tempDanger ?? 50) * 0.85;
+      const warnGas = (sensorConfig.gasDanger ?? 800) * 0.85;
+      const warnFlamePct = flameDangerPct * 0.85;
+      const bahaya = (!Number.isNaN(tempNum) && tempNum >= (sensorConfig.tempDanger ?? 50)) ||
+        (!Number.isNaN(gasNum) && gasNum >= (sensorConfig.gasDanger ?? 800)) ||
+        (flamePct >= flameDangerPct);
+      const waspada = (!Number.isNaN(tempNum) && tempNum >= warnTemp) ||
+        (!Number.isNaN(gasNum) && gasNum >= warnGas) ||
+        (flamePct >= warnFlamePct);
+      if (bahaya) return "BAHAYA";
+      if (waspada) return "WASPADA";
+      return "AMAN";
+    }
+
+    // Update panel Analisis C4.5 di UI
+    function updateC45Panel(sensorInput, result) {
+      // Update hasil klasifikasi
+      const classEl = document.getElementById("c45-result-class");
+      const confEl = document.getElementById("c45-result-confidence");
+      const pathEl = document.getElementById("c45-decision-path");
+      const inputEl = document.getElementById("c45-input-values");
+
+      if (classEl) {
+        const colors = { AMAN: "text-emerald-600", WASPADA: "text-amber-500", BAHAYA: "text-red-600" };
+        const icons = { AMAN: "🟢", WASPADA: "🟡", BAHAYA: "🔴" };
+        classEl.innerHTML = `<span class="${colors[result.class] || ''}">${icons[result.class] || ''} ${result.class}</span>`;
+      }
+      if (confEl) {
+        confEl.textContent = `${(result.confidence * 100).toFixed(1)}%`;
+      }
+
+      // Tampilkan input sensor
+      if (inputEl) {
+        inputEl.innerHTML = `
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <div class="bg-blue-50 rounded-xl p-2 text-center">
+              <p class="text-[8px] text-blue-400 font-bold uppercase">Suhu</p>
+              <p class="text-sm font-black text-blue-600">${sensorInput.temp}°C</p>
+            </div>
+            <div class="bg-cyan-50 rounded-xl p-2 text-center">
+              <p class="text-[8px] text-cyan-400 font-bold uppercase">Kelembapan</p>
+              <p class="text-sm font-black text-cyan-600">${sensorInput.hum}%</p>
+            </div>
+            <div class="bg-emerald-50 rounded-xl p-2 text-center">
+              <p class="text-[8px] text-emerald-400 font-bold uppercase">Gas</p>
+              <p class="text-sm font-black text-emerald-600">${sensorInput.gas} PPM</p>
+            </div>
+            <div class="bg-amber-50 rounded-xl p-2 text-center">
+              <p class="text-[8px] text-amber-400 font-bold uppercase">Api</p>
+              <p class="text-sm font-black text-amber-600">${sensorInput.flame} ADC</p>
+            </div>
+          </div>
+        `;
+      }
+
+      // Tampilkan decision path
+      if (pathEl) {
+        const attrLabels = { temp: "Suhu (°C)", hum: "Kelembapan (%)", gas: "Gas (PPM)", flame: "Api (ADC)" };
+        let pathHTML = '<div class="space-y-1.5">';
+        result.path.forEach((step, i) => {
+          const attrLabel = attrLabels[step.attribute] || step.attribute;
+          const isTrue = step.direction === "≤";
+          pathHTML += `
+            <div class="flex items-center gap-2 text-[10px]">
+              <span class="w-5 h-5 rounded-full ${isTrue ? 'bg-emerald-100 text-emerald-600' : 'bg-red-100 text-red-600'} flex items-center justify-center font-black text-[9px]">${i + 1}</span>
+              <span class="font-semibold text-slate-600">${attrLabel}</span>
+              <span class="text-slate-400">${step.direction}</span>
+              <span class="font-bold text-indigo-600">${step.threshold.toFixed(2)}</span>
+              <span class="text-slate-300">|</span>
+              <span class="text-slate-500">Nilai:</span>
+              <span class="font-bold text-slate-700">${step.value}</span>
+              <span class="text-[8px] text-slate-400 ml-auto">GR: ${step.gainRatio.toFixed(4)}</span>
+            </div>
+          `;
+        });
+        const colors = { AMAN: "bg-emerald-100 text-emerald-700", WASPADA: "bg-amber-100 text-amber-700", BAHAYA: "bg-red-100 text-red-700" };
+        pathHTML += `
+          <div class="flex items-center gap-2 text-[10px] mt-2 pt-2 border-t border-slate-100">
+            <span class="w-5 h-5 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center font-black text-[9px]">✓</span>
+            <span class="font-bold text-slate-600">Hasil Klasifikasi:</span>
+            <span class="px-2 py-0.5 rounded-full ${colors[result.class] || ''} font-black text-[9px] uppercase">${result.class}</span>
+            <span class="text-[8px] text-slate-400">(Confidence: ${(result.confidence * 100).toFixed(1)}%)</span>
+          </div>
+        `;
+        pathHTML += '</div>';
+        pathEl.innerHTML = pathHTML;
+      }
+    }
+
+    // Inisialisasi panel C4.5 dengan data model statis
+    function initC45Panel() {
+      if (!c45Model) return;
+
+      const statsEl = document.getElementById("c45-model-stats");
+      const treeEl = document.getElementById("c45-tree-text");
+      const rulesEl = document.getElementById("c45-rules-table");
+      const entropyEl = document.getElementById("c45-entropy-detail");
+
+      if (statsEl) {
+        const s = c45Model.stats;
+        statsEl.innerHTML = `
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <div class="bg-slate-50 rounded-xl p-3 text-center">
+              <p class="text-[8px] text-slate-400 font-bold uppercase">Total Data Training</p>
+              <p class="text-lg font-black text-slate-700">${s.totalData}</p>
+            </div>
+            <div class="bg-slate-50 rounded-xl p-3 text-center">
+              <p class="text-[8px] text-slate-400 font-bold uppercase">Akurasi Training</p>
+              <p class="text-lg font-black text-indigo-600">${(s.accuracy * 100).toFixed(1)}%</p>
+            </div>
+            <div class="bg-slate-50 rounded-xl p-3 text-center">
+              <p class="text-[8px] text-slate-400 font-bold uppercase">Jumlah Node</p>
+              <p class="text-lg font-black text-slate-700">${s.nodeCount}</p>
+            </div>
+            <div class="bg-slate-50 rounded-xl p-3 text-center">
+              <p class="text-[8px] text-slate-400 font-bold uppercase">Jumlah Leaf</p>
+              <p class="text-lg font-black text-slate-700">${s.leafCount}</p>
+            </div>
+          </div>
+          <div class="grid grid-cols-3 gap-2 mt-2">
+            <div class="bg-emerald-50 rounded-xl p-2 text-center">
+              <p class="text-[8px] text-emerald-400 font-bold uppercase">AMAN</p>
+              <p class="text-sm font-black text-emerald-600">${s.classDistribution.AMAN || 0} data</p>
+            </div>
+            <div class="bg-amber-50 rounded-xl p-2 text-center">
+              <p class="text-[8px] text-amber-400 font-bold uppercase">WASPADA</p>
+              <p class="text-sm font-black text-amber-600">${s.classDistribution.WASPADA || 0} data</p>
+            </div>
+            <div class="bg-red-50 rounded-xl p-2 text-center">
+              <p class="text-[8px] text-red-400 font-bold uppercase">BAHAYA</p>
+              <p class="text-sm font-black text-red-600">${s.classDistribution.BAHAYA || 0} data</p>
+            </div>
+          </div>
+        `;
+      }
+
+      // Entropy detail
+      if (entropyEl) {
+        const s = c45Model.stats;
+        const tree = c45Model.tree;
+        let html = `
+          <div class="space-y-3">
+            <div class="bg-indigo-50 rounded-xl p-3">
+              <p class="text-[9px] font-bold text-indigo-500 uppercase mb-1">Entropy Total Dataset (H(S))</p>
+              <p class="text-xl font-black text-indigo-700">${s.totalEntropy.toFixed(4)} bit</p>
+              <p class="text-[8px] text-indigo-400 mt-1">H(S) = -Σ p<sub>i</sub> × log<sub>2</sub>(p<sub>i</sub>)</p>
+            </div>
+        `;
+
+        // Tampilkan detail split root node
+        if (tree.type === "node" && tree.splitDetails) {
+          html += `
+            <div class="bg-white border border-slate-100 rounded-xl p-3">
+              <p class="text-[9px] font-bold text-slate-500 uppercase mb-2">Perbandingan Gain Ratio — Root Node</p>
+              <table class="w-full text-[9px]">
+                <thead>
+                  <tr class="border-b border-slate-100">
+                    <th class="text-left py-1 text-slate-400 font-bold">Atribut</th>
+                    <th class="text-right py-1 text-slate-400 font-bold">Threshold</th>
+                    <th class="text-right py-1 text-slate-400 font-bold">Info Gain</th>
+                    <th class="text-right py-1 text-slate-400 font-bold">Split Info</th>
+                    <th class="text-right py-1 text-slate-400 font-bold">Gain Ratio</th>
+                  </tr>
+                </thead>
+                <tbody>
+          `;
+          const attrLabels = { temp: "Suhu (°C)", hum: "Kelembapan (%)", gas: "Gas (PPM)", flame: "Api (ADC)" };
+          const entries = Object.entries(tree.splitDetails)
+            .sort((a, b) => b[1].gainRatio - a[1].gainRatio);
+          entries.forEach(([attr, detail], idx) => {
+            const isBest = attr === tree.attribute;
+            html += `
+              <tr class="${isBest ? 'bg-indigo-50 font-bold' : ''} border-b border-slate-50">
+                <td class="py-1.5 ${isBest ? 'text-indigo-700' : 'text-slate-600'}">${isBest ? '★ ' : ''}${attrLabels[attr] || attr}</td>
+                <td class="py-1.5 text-right text-slate-500">${detail.threshold != null ? detail.threshold.toFixed(2) : '-'}</td>
+                <td class="py-1.5 text-right ${isBest ? 'text-indigo-600' : 'text-slate-500'}">${detail.infoGain.toFixed(4)}</td>
+                <td class="py-1.5 text-right text-slate-500">${detail.splitInfo.toFixed(4)}</td>
+                <td class="py-1.5 text-right ${isBest ? 'text-indigo-600' : 'text-slate-500'}">${detail.gainRatio.toFixed(4)}</td>
+              </tr>
+            `;
+          });
+          html += `</tbody></table>
+            <p class="text-[8px] text-slate-400 mt-2">★ = Atribut terpilih (Gain Ratio tertinggi)</p>
+            </div>
+          `;
+        }
+        html += '</div>';
+        entropyEl.innerHTML = html;
+      }
+
+      // Pohon keputusan (text)
+      if (treeEl) {
+        treeEl.textContent = c45Model.treeText;
+      }
+
+      // Rules table
+      if (rulesEl) {
+        const rules = c45Model.rules;
+        let html = '<table class="w-full text-[9px]">';
+        html += '<thead><tr class="border-b border-slate-200">';
+        html += '<th class="text-left py-2 text-slate-400 font-bold">No</th>';
+        html += '<th class="text-left py-2 text-slate-400 font-bold">Aturan (Conditions)</th>';
+        html += '<th class="text-left py-2 text-slate-400 font-bold">Kelas</th>';
+        html += '<th class="text-right py-2 text-slate-400 font-bold">Data</th>';
+        html += '</tr></thead><tbody>';
+        const colors = { AMAN: "bg-emerald-100 text-emerald-700", WASPADA: "bg-amber-100 text-amber-700", BAHAYA: "bg-red-100 text-red-700" };
+        rules.forEach((rule, i) => {
+          html += `<tr class="border-b border-slate-50">`;
+          html += `<td class="py-1.5 text-slate-400">${i + 1}</td>`;
+          html += `<td class="py-1.5 text-slate-600">${rule.conditions.join(' <span class="text-indigo-400 font-bold">DAN</span> ')}</td>`;
+          html += `<td class="py-1.5"><span class="px-2 py-0.5 rounded-full ${colors[rule.class] || ''} font-bold text-[8px] uppercase">${rule.class}</span></td>`;
+          html += `<td class="py-1.5 text-right text-slate-500">${rule.count}</td>`;
+          html += `</tr>`;
+        });
+        html += '</tbody></table>';
+        rulesEl.innerHTML = html;
       }
     }
 
@@ -433,7 +678,7 @@ function App() {
           const endTs = new Date(e).getTime();
           arr = arr.filter((item) => item.ts >= startTs && item.ts <= endTs);
         }
-        historyLogs = arr.slice(-500);
+        historyLogs = arr;
         historyPage = 1;
         renderHistoryTable();
       } catch (err) {
@@ -516,13 +761,13 @@ function App() {
 
     function switchView(v) {
       currentView = v;
-      ["view-live", "view-history", "view-settings"].forEach(
+      ["view-live", "view-history", "view-settings", "view-c45"].forEach(
         (el) => {
           const node = document.getElementById(el);
           if (node) node.classList.add("hidden");
         }
       );
-      ["btn-live", "btn-history", "btn-settings"].forEach(
+      ["btn-live", "btn-history", "btn-settings", "btn-c45"].forEach(
         (btn) => {
           const node = document.getElementById(btn);
           if (node) node.classList.remove("active-tab");
@@ -532,6 +777,9 @@ function App() {
       document.getElementById("btn-" + v)?.classList.add("active-tab");
       if (v === "history") {
         muatLengkapHistori();
+      }
+      if (v === "c45") {
+        initC45Panel();
       }
       // Kembali ke Monitoring: resize & refresh grafik agar tampil benar setelah lama di dashboard lain
       if (v === "live") {
@@ -741,7 +989,8 @@ function App() {
       lastUp = Date.now();
       updateLiveInterface(buffer);
 
-      // Simpan otomatis ke histori setiap ada data telemetry (throttle 2 detik agar tidak spam)
+      // Simpan otomatis ke histori setiap 1 menit (60 detik)
+      // Interval 1 menit = ~1.440 data/hari — cukup detail tanpa membebani Firebase
       if (buffer) {
         const normalized = normalizeTelemetry(buffer);
         const norm = normalized || buffer;
@@ -749,7 +998,7 @@ function App() {
         const tsNum = typeof ts === "number" ? ts : Number(ts) || Date.now();
         const flameVal = getFlameValue(normalized) ?? getFlameValue(buffer);
         const now = Date.now();
-        const throttleMs = 2000;
+        const throttleMs = 60000;
         if (now - lastPushToLogs >= throttleMs) {
           lastPushToLogs = now;
           lastLoggedTs = tsNum;
@@ -1096,6 +1345,15 @@ function App() {
             <span className="hidden md:inline">Histori Data</span>
           </button>
           <button
+            onClick={() => call("switchView", "c45")}
+            id="btn-c45"
+            className="flex-1 md:flex-none min-w-0 py-2 md:py-2.5 px-2 md:px-4 rounded-full text-[9px] sm:text-[10px] font-semibold text-slate-500 hover:bg-slate-50 uppercase tracking-[0.15em] md:tracking-[0.2em] flex items-center justify-start gap-1 md:gap-2 transition-all text-left"
+          >
+            <i className="fas fa-brain text-[10px] md:text-xs shrink-0"></i>
+            <span className="md:hidden">C4.5</span>
+            <span className="hidden md:inline">Analisis C4.5</span>
+          </button>
+          <button
             onClick={() => call("switchView", "settings")}
             id="btn-settings"
             className="flex-1 md:flex-none min-w-0 py-2 md:py-2.5 px-2 md:px-4 rounded-full text-[9px] sm:text-[10px] font-semibold text-slate-500 hover:bg-slate-50 uppercase tracking-[0.15em] md:tracking-[0.2em] flex items-center justify-start gap-1 md:gap-2 transition-all text-left"
@@ -1380,6 +1638,126 @@ function App() {
               </div>
             </div>
             </div>
+
+        {/* C4.5 ANALYSIS VIEW */}
+        <div
+          id="view-c45"
+          className="hidden flex-1 flex flex-col gap-4 overflow-y-auto"
+        >
+          <div className="shrink-0">
+            <div className="bg-white px-4 sm:px-8 py-3 sm:py-4 rounded-2xl md:rounded-[2.5rem] border border-slate-200 shadow-sm flex items-center gap-3">
+              <div className="h-8 w-8 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white shadow">
+                <i className="fas fa-brain text-xs"></i>
+              </div>
+              <div>
+                <h2 className="text-xs sm:text-sm md:text-base font-medium text-slate-700 uppercase tracking-normal">
+                  Analisis Algoritma C4.5
+                </h2>
+                <p className="text-[8px] text-slate-400">Decision Tree Classifier untuk Deteksi Kebakaran</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Hasil Klasifikasi Real-Time */}
+          <div className="bg-white p-4 sm:p-6 rounded-2xl md:rounded-[2.5rem] border border-slate-200 shadow-sm">
+            <p className="text-[10px] font-bold text-indigo-500 uppercase tracking-[0.25em] mb-3 flex items-center gap-2">
+              <i className="fas fa-bolt"></i>
+              Klasifikasi Real-Time (C4.5)
+            </p>
+            <div className="mb-3" id="c45-input-values">
+              <p className="text-[9px] text-slate-400 italic">Menunggu data sensor...</p>
+            </div>
+            <div className="flex items-center gap-4 mb-3">
+              <div>
+                <p className="text-[8px] text-slate-400 uppercase font-bold">Hasil Klasifikasi</p>
+                <p id="c45-result-class" className="text-2xl font-black text-slate-700">--</p>
+              </div>
+              <div>
+                <p className="text-[8px] text-slate-400 uppercase font-bold">Confidence</p>
+                <p id="c45-result-confidence" className="text-2xl font-black text-indigo-600">--%</p>
+              </div>
+            </div>
+            <div>
+              <p className="text-[9px] font-bold text-slate-500 uppercase mb-2">Jalur Keputusan (Decision Path)</p>
+              <div id="c45-decision-path" className="bg-slate-50 rounded-xl p-3">
+                <p className="text-[9px] text-slate-400 italic">Belum ada klasifikasi...</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Statistik Model */}
+          <div className="bg-white p-4 sm:p-6 rounded-2xl md:rounded-[2.5rem] border border-slate-200 shadow-sm">
+            <p className="text-[10px] font-bold text-slate-500 uppercase tracking-[0.25em] mb-3 flex items-center gap-2">
+              <i className="fas fa-chart-bar"></i>
+              Statistik Model C4.5
+            </p>
+            <div id="c45-model-stats">
+              <p className="text-[9px] text-slate-400 italic">Memuat statistik model...</p>
+            </div>
+          </div>
+
+          {/* Detail Entropy & Gain Ratio */}
+          <div className="bg-white p-4 sm:p-6 rounded-2xl md:rounded-[2.5rem] border border-slate-200 shadow-sm">
+            <p className="text-[10px] font-bold text-indigo-500 uppercase tracking-[0.25em] mb-3 flex items-center gap-2">
+              <i className="fas fa-calculator"></i>
+              Perhitungan Entropy & Gain Ratio
+            </p>
+            <div id="c45-entropy-detail">
+              <p className="text-[9px] text-slate-400 italic">Memuat perhitungan...</p>
+            </div>
+          </div>
+
+          {/* Pohon Keputusan (Teks) */}
+          <div className="bg-white p-4 sm:p-6 rounded-2xl md:rounded-[2.5rem] border border-slate-200 shadow-sm">
+            <p className="text-[10px] font-bold text-slate-500 uppercase tracking-[0.25em] mb-3 flex items-center gap-2">
+              <i className="fas fa-project-diagram"></i>
+              Struktur Pohon Keputusan
+            </p>
+            <div className="bg-slate-900 rounded-xl p-4 overflow-x-auto">
+              <pre id="c45-tree-text" className="text-[9px] sm:text-[10px] text-emerald-400 font-mono leading-relaxed whitespace-pre">Memuat pohon keputusan...</pre>
+            </div>
+          </div>
+
+          {/* Tabel Aturan (Rules) */}
+          <div className="bg-white p-4 sm:p-6 rounded-2xl md:rounded-[2.5rem] border border-slate-200 shadow-sm">
+            <p className="text-[10px] font-bold text-slate-500 uppercase tracking-[0.25em] mb-3 flex items-center gap-2">
+              <i className="fas fa-list-check"></i>
+              Aturan Klasifikasi (Rules)
+            </p>
+            <div className="overflow-x-auto" id="c45-rules-table">
+              <p className="text-[9px] text-slate-400 italic">Memuat aturan...</p>
+            </div>
+          </div>
+
+          {/* Penjelasan Metode */}
+          <div className="bg-gradient-to-br from-indigo-50 to-purple-50 p-4 sm:p-6 rounded-2xl md:rounded-[2.5rem] border border-indigo-100 shadow-sm">
+            <p className="text-[10px] font-bold text-indigo-600 uppercase tracking-[0.25em] mb-3 flex items-center gap-2">
+              <i className="fas fa-info-circle"></i>
+              Tentang Algoritma C4.5
+            </p>
+            <div className="space-y-2 text-[9px] sm:text-[10px] text-slate-600 leading-relaxed">
+              <p>
+                <strong>Algoritma C4.5</strong> (Quinlan, 1993) adalah algoritma decision tree yang membangun pohon keputusan dari dataset training berlabel. Algoritma ini merupakan pengembangan dari ID3 yang menambahkan <strong>Gain Ratio</strong> sebagai ukuran pemilihan atribut.
+              </p>
+              <p>
+                <strong>Cara Kerja:</strong>
+              </p>
+              <ol className="list-decimal ml-4 space-y-1">
+                <li>Hitung <strong>Entropy</strong> total dataset: H(S) = -Σ p<sub>i</sub> × log<sub>2</sub>(p<sub>i</sub>)</li>
+                <li>Untuk setiap atribut, cari <strong>threshold</strong> terbaik dan hitung <strong>Information Gain</strong></li>
+                <li>Hitung <strong>Split Information</strong> untuk normalisasi: SI = -Σ (|S<sub>v</sub>|/|S|) × log<sub>2</sub>(|S<sub>v</sub>|/|S|)</li>
+                <li>Pilih atribut dengan <strong>Gain Ratio</strong> tertinggi: GR = Information Gain / Split Information</li>
+                <li>Buat node keputusan, bagi data, dan ulangi secara rekursif</li>
+              </ol>
+              <p>
+                <strong>Keunggulan C4.5 vs IF-ELSE sederhana:</strong> C4.5 mempertimbangkan <em>kombinasi seluruh faktor sensor</em> secara simultan, bukan memeriksa setiap sensor satu per satu. Ini menghasilkan klasifikasi yang lebih akurat dan nuanced.
+              </p>
+              <p className="text-[8px] text-slate-400 mt-2">
+                Threshold pada C4.5 bersifat <strong>statis</strong> (tidak berubah setiap hari) — ditentukan sekali saat training berdasarkan dataset berlabel yang cukup besar. Ini menjamin konsistensi dan keandalan sistem deteksi kebakaran.
+              </p>
+            </div>
+          </div>
+        </div>
 
         {/* SETTINGS VIEW */}
         <div
