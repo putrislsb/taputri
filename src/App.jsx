@@ -1,5 +1,13 @@
 import React, { useEffect, useRef } from "react";
-import { db } from "./firebase";
+import {
+  db,
+  auth,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged,
+  updateProfile,
+} from "./firebase";
 import { ref, onValue, get, set, push } from "firebase/database";
 
 function App() {
@@ -235,7 +243,7 @@ function App() {
           if (myCharts.liveHum) myCharts.liveHum.data.datasets[0].data[idx] = vHum != null ? vHum : 0;
           if (myCharts.liveGas) myCharts.liveGas.data.datasets[0].data[idx] = vGas != null ? vGas : 0;
           if (myCharts.liveFlame) myCharts.liveFlame.data.datasets[0].data[idx] = vFlame != null ? vFlame : 0;
-          charts.filter(Boolean).forEach((c) => { try { c.update("none"); } catch (e) {} });
+          charts.filter(Boolean).forEach((c) => { try { c.update("none"); } catch (e) { } });
         }
         return;
       }
@@ -427,13 +435,14 @@ function App() {
             flame: item.flame ?? item.flame_raw ?? item.api ?? item.API ?? item.flameSensor ?? item.flame_adc ?? item.adc,
             ts: item.ts ?? item.timestamp ?? Date.now(),
           }))
-          .sort((a, b) => a.ts - b.ts);
+          .sort((a, b) => b.ts - a.ts);
         if (s && e) {
           const startTs = new Date(s).getTime();
           const endTs = new Date(e).getTime();
           arr = arr.filter((item) => item.ts >= startTs && item.ts <= endTs);
         }
-        historyLogs = arr.slice(-500);
+        // Removed the slice(0, 500) limit so it displays all historical data
+        historyLogs = arr;
         historyPage = 1;
         renderHistoryTable();
       } catch (err) {
@@ -455,8 +464,16 @@ function App() {
       }
       const normalized = normalizeTelemetry(buffer);
       const norm = normalized || buffer;
-      const ts = norm.ts ?? norm.timestamp ?? Date.now();
-      const tsNum = typeof ts === "number" ? ts : Number(ts) || Date.now();
+      const ts = norm.ts ?? norm.timestamp;
+      let tsNum = typeof ts === "number" ? ts : Number(ts);
+
+      // Convert seconds to ms if needed
+      if (tsNum < 2000000000) tsNum *= 1000;
+
+      // If the device clock is hopelessly broken (before year 2024) or invalid, force current real time
+      if (!tsNum || isNaN(tsNum) || tsNum < 1704067200000) {
+        tsNum = Date.now();
+      }
       const flameVal = getFlameValue(normalized) ?? getFlameValue(buffer);
       const logPayload = {
         temp: norm.temp ?? norm.temperature ?? norm.suhu,
@@ -484,10 +501,10 @@ function App() {
       });
       const blob = new Blob([csv], { type: "text/csv" });
       const url = window.URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
+      const a = document.createElement("a");
+      a.href = url;
       a.download = `Laporan_SmartFire_${Date.now()}.csv`;
-    a.click();
+      a.click();
       window.URL.revokeObjectURL(url);
     }
 
@@ -538,13 +555,13 @@ function App() {
         requestAnimationFrame(() => {
           [myCharts.liveSuhu, myCharts.liveHum, myCharts.liveGas, myCharts.liveFlame]
             .filter(Boolean)
-            .forEach((c) => { try { c.resize(); c.update("none"); } catch (_) {} });
+            .forEach((c) => { try { c.resize(); c.update("none"); } catch (_) { } });
         });
         if (buffer) updateLiveCharts(buffer);
       }
     }
 
-    function handleLogin(event) {
+    async function handleLogin(event) {
       event.preventDefault();
       const emailInput = document.getElementById("login-email");
       const passInput = document.getElementById("login-password");
@@ -560,32 +577,24 @@ function App() {
         return;
       }
 
-      let users = [];
       try {
-        const raw = localStorage.getItem("smartfireUsers");
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed)) users = parsed;
+        await signInWithEmailAndPassword(auth, email, pass);
+        // Login success implies onAuthStateChanged will handle hiding the screen
+        document.getElementById("login-screen")?.classList.add("hidden");
+        err.classList.add("hidden");
+        emailInput.value = "";
+        passInput.value = "";
+      } catch (error) {
+        let msg = "Terjadi kesalahan saat masuk.";
+        if (error.code === "auth/invalid-credential" || error.code === "auth/user-not-found" || error.code === "auth/wrong-password") {
+          msg = "Email atau kata sandi salah.";
         }
-      } catch {
-        // ignore
-      }
-
-      const user = users.find((u) => u.email === email && u.password === pass);
-      if (!user) {
-        err.innerText = "Email atau kata sandi salah.";
+        err.innerText = msg;
         err.classList.remove("hidden");
-        return;
       }
-
-      localStorage.setItem("smartfireLogged", "1");
-      document.getElementById("login-screen")?.classList.add("hidden");
-      err.classList.add("hidden");
-      emailInput.value = "";
-      passInput.value = "";
     }
 
-    function handleRegister(event) {
+    async function handleRegister(event) {
       event.preventDefault();
       const nameInput = document.getElementById("register-name");
       const emailInput = document.getElementById("register-email");
@@ -620,34 +629,29 @@ function App() {
         return;
       }
 
-      let users = [];
       try {
-        const raw = localStorage.getItem("smartfireUsers");
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed)) users = parsed;
+        const userCredential = await createUserWithEmailAndPassword(auth, email, pass);
+        if (name) {
+          await updateProfile(userCredential.user, { displayName: name });
         }
-      } catch {
-        // ignore
-      }
 
-      if (users.some((u) => u.email === email)) {
-        err.innerText = "Email sudah terdaftar. Silakan masuk.";
+        document.getElementById("login-screen")?.classList.add("hidden");
+        err.classList.add("hidden");
+
+        emailInput.value = "";
+        passInput.value = "";
+        confirmInput.value = "";
+        if (nameInput) nameInput.value = "";
+      } catch (error) {
+        let msg = error.message;
+        if (error.code === "auth/email-already-in-use") {
+          msg = "Email sudah terdaftar. Silakan masuk.";
+        } else if (error.code === "auth/weak-password") {
+          msg = "Kata sandi terlalu lemah.";
+        }
+        err.innerText = msg;
         err.classList.remove("hidden");
-        return;
       }
-
-      users.push({ email, password: pass, name });
-      localStorage.setItem("smartfireUsers", JSON.stringify(users));
-
-      localStorage.setItem("smartfireLogged", "1");
-      document.getElementById("login-screen")?.classList.add("hidden");
-      err.classList.add("hidden");
-
-      emailInput.value = "";
-      passInput.value = "";
-      confirmInput.value = "";
-      if (nameInput) nameInput.value = "";
     }
 
     function switchAuthTab(tab) {
@@ -708,19 +712,28 @@ function App() {
       requestAnimationFrame(() => {
         [myCharts.liveSuhu, myCharts.liveHum, myCharts.liveGas, myCharts.liveFlame]
           .filter(Boolean)
-          .forEach((c) => { try { c.resize(); c.update("none"); } catch (_) {} });
+          .forEach((c) => { try { c.resize(); c.update("none"); } catch (_) { } });
       });
       return true;
     }
 
-    let unsubscribe = () => {};
+    let unsubscribe = () => { };
     let intervalId = null;
+
+    async function handleLogout() {
+      try {
+        await signOut(auth);
+      } catch (error) {
+        console.error("Gagal logout:", error);
+      }
+    }
 
     // Jalankan listener Firebase + timer + login SEKALI, tidak tunggu Chart
     function startListenerAndTimer() {
       const api = {
         handleLogin,
         handleRegister,
+        handleLogout,
         switchAuthTab,
         saveSensorConfig,
         resetSensorConfig,
@@ -737,87 +750,89 @@ function App() {
       try {
         const telemetryRef = ref(db, "device/RIM_ROOM-01/telemetry");
         unsubscribe = onValue(telemetryRef, (snap) => {
-      buffer = snap.val();
-      lastUp = Date.now();
-      updateLiveInterface(buffer);
+          buffer = snap.val();
+          lastUp = Date.now();
+          updateLiveInterface(buffer);
 
-      // Simpan otomatis ke histori setiap ada data telemetry (throttle 2 detik agar tidak spam)
-      if (buffer) {
-        const normalized = normalizeTelemetry(buffer);
-        const norm = normalized || buffer;
-        const ts = norm.ts ?? norm.timestamp ?? Date.now();
-        const tsNum = typeof ts === "number" ? ts : Number(ts) || Date.now();
-        const flameVal = getFlameValue(normalized) ?? getFlameValue(buffer);
-        const now = Date.now();
-        const throttleMs = 2000;
-        if (now - lastPushToLogs >= throttleMs) {
-          lastPushToLogs = now;
-          lastLoggedTs = tsNum;
-          const logPayload = {
-            temp: norm.temp ?? norm.temperature ?? norm.suhu,
-            hum: norm.hum ?? norm.humidity ?? norm.kelembapan,
-            gas: norm.gas ?? norm.gasPPM,
-            flame: flameVal,
-            ts: tsNum,
-          };
-          push(ref(db, "device/RIM_ROOM-01/logs"), logPayload)
-            .then(() => { window.__lastLogOk = Date.now(); })
-            .catch((err) => {
-              console.error("[Histori] Gagal simpan ke Firebase logs:", err);
-              if (window.__showLogError !== false) {
-                alert("Gagal menyimpan ke histori: " + (err?.message || String(err)) + "\n\nCek: Firebase Console → Realtime Database → Rules. Jalankan: firebase deploy --only database");
-                window.__showLogError = false;
-              }
-            });
-        }
-      }
+          // Simpan otomatis ke histori setiap ada data telemetry (throttle 2 detik agar tidak spam)
+          if (buffer) {
+            const normalized = normalizeTelemetry(buffer);
+            const norm = normalized || buffer;
+            const ts = norm.ts ?? norm.timestamp;
+            let tsNum = typeof ts === "number" ? ts : Number(ts);
 
-      // Grafik realtime tetap di-update meskipun user sedang di dashboard Histori/Pengaturan
-      if (buffer) {
-        updateLiveCharts(buffer);
-      }
-    });
+            // Convert seconds to ms if needed
+            if (tsNum < 2000000000) tsNum *= 1000;
 
-      intervalId = setInterval(() => {
-      const isOff = (Date.now() - lastUp) / 1000 > 30;
-      const statusDot = document.getElementById("status-dot");
-      const statusText = document.getElementById("status-text");
-      if (statusDot) {
-        statusDot.className = isOff
-          ? "h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse"
-          : "h-1.5 w-1.5 rounded-full bg-emerald-500 shadow-md";
-      }
-      if (statusText) {
-        statusText.innerText = isOff ? "OFFLINE" : "ALAT ONLINE";
-      }
+            // If the device clock is hopelessly broken (before year 2024) or invalid, force current real time
+            if (!tsNum || isNaN(tsNum) || tsNum < 1704067200000) {
+              tsNum = Date.now();
+            }
+            const flameVal = getFlameValue(normalized) ?? getFlameValue(buffer);
+            const now = Date.now();
+            const throttleMs = 2000;
+            if (now - lastPushToLogs >= throttleMs) {
+              lastPushToLogs = now;
+              lastLoggedTs = tsNum;
+              const humanTime = new Date(tsNum).toLocaleString("id-ID");
+              const logPayload = {
+                temp: norm.temp ?? norm.temperature ?? norm.suhu,
+                hum: norm.hum ?? norm.humidity ?? norm.kelembapan,
+                gas: norm.gas ?? norm.gasPPM,
+                flame: flameVal,
+                ts: tsNum,
+                time_log: humanTime,
+              };
 
-      if (currentView === "live" && buffer) {
-        sisa--;
-        if (sisa < 0) sisa = 10;
-        const syncVal = document.getElementById("sync-val");
-        if (syncVal) syncVal.innerText = sisa;
-      }
-    }, 1000);
+              set(ref(db, "device/RIM_ROOM-01/lastSeen"), humanTime).catch(e => console.error("Update lastSeen fail:", e));
 
-      if (localStorage.getItem("smartfireLogged") === "1") {
-        document.getElementById("login-screen")?.classList.add("hidden");
-      } else {
-        let users = [];
-        try {
-          const raw = localStorage.getItem("smartfireUsers");
-          if (raw) {
-            const parsed = JSON.parse(raw);
-            if (Array.isArray(parsed)) users = parsed;
+              push(ref(db, "device/RIM_ROOM-01/logs"), logPayload)
+                .then(() => { window.__lastLogOk = Date.now(); })
+                .catch((err) => {
+                  console.error("[Histori] Gagal simpan ke Firebase logs:", err);
+                  if (window.__showLogError !== false) {
+                    alert("Gagal menyimpan ke histori: " + (err?.message || String(err)) + "\n\nCek: Firebase Console → Realtime Database → Rules. Jalankan: firebase deploy --only database");
+                    window.__showLogError = false;
+                  }
+                });
+            }
           }
-        } catch {
-          // ignore
-        }
-        if (!users.length) {
-          switchAuthTab("register");
-        } else {
-          switchAuthTab("login");
-        }
-      }
+
+          // Grafik realtime tetap di-update meskipun user sedang di dashboard Histori/Pengaturan
+          if (buffer) {
+            updateLiveCharts(buffer);
+          }
+        });
+
+        intervalId = setInterval(() => {
+          const isOff = (Date.now() - lastUp) / 1000 > 30;
+          const statusDot = document.getElementById("status-dot");
+          const statusText = document.getElementById("status-text");
+          if (statusDot) {
+            statusDot.className = isOff
+              ? "h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse"
+              : "h-1.5 w-1.5 rounded-full bg-emerald-500 shadow-md";
+          }
+          if (statusText) {
+            statusText.innerText = isOff ? "OFFLINE" : "ALAT ONLINE";
+          }
+
+          if (currentView === "live" && buffer) {
+            sisa--;
+            if (sisa < 0) sisa = 10;
+            const syncVal = document.getElementById("sync-val");
+            if (syncVal) syncVal.innerText = sisa;
+          }
+        }, 1000);
+
+        onAuthStateChanged(auth, (user) => {
+          if (user) {
+            document.getElementById("login-screen")?.classList.add("hidden");
+          } else {
+            document.getElementById("login-screen")?.classList.remove("hidden");
+            switchAuthTab("login");
+          }
+        });
       } catch (e) {
         console.error("Firebase telemetry listener error:", e);
       }
@@ -834,7 +849,7 @@ function App() {
           updateLiveCharts(buffer);
           [myCharts.liveSuhu, myCharts.liveHum, myCharts.liveGas, myCharts.liveFlame]
             .filter(Boolean)
-            .forEach((c) => { try { c.resize(); c.update("none"); } catch (_) {} });
+            .forEach((c) => { try { c.resize(); c.update("none"); } catch (_) { } });
         }
       }
     };
@@ -888,16 +903,16 @@ function App() {
           <div className="flex items-center gap-3 mb-2">
             <div className="h-10 w-10 rounded-full bg-gradient-to-tr from-orange-500 via-red-500 to-sky-500 flex items-center justify-center text-white shadow-lg">
               <i className="fas fa-fire text-lg"></i>
-          </div>
-          <div>
+            </div>
+            <div>
               <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-[0.25em]">
                 Smart Fire
               </p>
               <h1 className="text-lg font-extrabold text-slate-800 uppercase tracking-[0.2em]">
                 Monitoring
               </h1>
+            </div>
           </div>
-        </div>
           <p className="text-[11px] text-slate-500">
             Masuk atau daftar akun baru untuk mengakses dashboard monitoring
             kebakaran secara real-time.
@@ -943,7 +958,7 @@ function App() {
                   className="w-full px-3 py-2 rounded-xl border border-slate-200 text-[11px] focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   placeholder="Masukkan email"
                 />
-        </div>
+              </div>
               <div className="space-y-1">
                 <label
                   htmlFor="login-password"
@@ -1054,7 +1069,7 @@ function App() {
             untuk mereset akun.
           </p>
         </div>
-            </div>
+      </div>
 
       {/* SIDEBAR */}
       <aside className="w-full md:w-64 bg-white border-b md:border-b-0 md:border-r border-slate-200 flex flex-col p-3 sm:p-4 shrink-0 shadow-sm z-50 safe-area-inset">
@@ -1104,6 +1119,15 @@ function App() {
             <span className="md:hidden">Setting</span>
             <span className="hidden md:inline">Pengaturan</span>
           </button>
+          <button
+            onClick={() => call("handleLogout")}
+            id="btn-logout"
+            className="flex-1 md:flex-none min-w-0 py-2 md:py-2.5 px-2 md:px-4 rounded-full text-[9px] sm:text-[10px] font-bold text-red-500 hover:bg-red-50 uppercase tracking-[0.15em] md:tracking-[0.2em] flex items-center justify-start gap-1 md:gap-2 transition-all text-left md:mt-4"
+          >
+            <i className="fas fa-sign-out-alt text-[10px] md:text-xs shrink-0"></i>
+            <span className="md:hidden">Keluar</span>
+            <span className="hidden md:inline">Keluar</span>
+          </button>
         </nav>
 
         {/* Metrik sidebar */}
@@ -1118,7 +1142,7 @@ function App() {
             <div className="flex items-center gap-2">
               <div className="h-8 w-8 rounded-full bg-white flex items-center justify-center text-blue-500 shadow">
                 <i className="fas fa-temperature-high text-sm"></i>
-                  </div>
+              </div>
               <span className="text-[9px] font-bold text-blue-500 uppercase tracking-widest">
                 Suhu
               </span>
@@ -1126,9 +1150,9 @@ function App() {
             <div className="text-right leading-none">
               <p className="text-xl font-black text-slate-800 mt-0.5">
                 <span id="side-temp">--</span>°C
-                    </p>
-                  </div>
-                </div>
+              </p>
+            </div>
+          </div>
           <div
             id="card-hum"
             className="p-3 bg-cyan-50 border border-cyan-100 rounded-2xl flex items-center justify-between shadow-sm"
@@ -1140,13 +1164,13 @@ function App() {
               <span className="text-[9px] font-bold text-cyan-500 uppercase tracking-widest">
                 Kelembapan
               </span>
-                  </div>
+            </div>
             <div className="text-right leading-none">
               <p className="text-xl font-black text-slate-800 mt-0.5">
                 <span id="side-hum">--</span>%
-                    </p>
-                  </div>
-                </div>
+              </p>
+            </div>
+          </div>
           <div
             id="card-gas"
             className="p-3 bg-emerald-50 border border-emerald-100 rounded-2xl flex items-center justify-between shadow-sm"
@@ -1158,7 +1182,7 @@ function App() {
               <span className="text-[9px] font-bold text-emerald-500 uppercase tracking-widest">
                 Gas
               </span>
-                  </div>
+            </div>
             <div className="text-right leading-none">
               <p className="text-xl font-black text-slate-800 mt-0.5">
                 <span id="side-gas">--</span>
@@ -1166,8 +1190,8 @@ function App() {
                   PPM
                 </span>
               </p>
-                  </div>
-                </div>
+            </div>
+          </div>
           <div
             id="card-flame"
             className="p-3 bg-amber-50 border border-amber-100 rounded-2xl flex items-center justify-between shadow-sm"
@@ -1207,10 +1231,10 @@ function App() {
                 className="text-[11px] font-black text-rose-600 uppercase mt-0.5"
               >
                 Aman
-                    </p>
-                  </div>
-                </div>
-              </div>
+              </p>
+            </div>
+          </div>
+        </div>
 
         <div className="mt-4 pt-4 border-t border-slate-100 flex flex-col items-center">
           <p className="text-[8px] font-bold uppercase text-slate-400 tracking-[0.25em] mb-1">
@@ -1231,7 +1255,7 @@ function App() {
             >
               Status Alat : Online
             </span>
-                  </div>
+          </div>
         </div>
       </aside>
 
@@ -1354,13 +1378,13 @@ function App() {
             <div className="mt-3 flex items-center justify-between text-[9px] text-slate-500">
               <span id="history-count">0 data</span>
               <div className="flex items-center gap-2">
-                  <button
+                <button
                   id="btn-history-prev"
                   onClick={() => call("changeHistoryPage", -1)}
                   className="px-3 py-2 min-h-[36px] rounded-lg border border-slate-200 text-slate-500 disabled:opacity-40 disabled:cursor-not-allowed text-[9px] sm:text-[10px] font-semibold touch-manipulation"
                 >
                   Sebelumnya
-                  </button>
+                </button>
                 <input
                   id="history-page-input"
                   type="number"
@@ -1369,17 +1393,17 @@ function App() {
                   defaultValue={1}
                 />
                 <span id="history-page-total" className="text-[9px] sm:text-[10px]"> / 1</span>
-                  <button
+                <button
                   id="btn-history-next"
                   onClick={() => call("changeHistoryPage", 1)}
                   className="px-3 py-2 min-h-[36px] rounded-lg border border-slate-200 text-slate-500 disabled:opacity-40 disabled:cursor-not-allowed text-[9px] sm:text-[10px] font-semibold touch-manipulation"
                 >
                   Berikutnya
-                  </button>
-                </div>
+                </button>
               </div>
             </div>
-            </div>
+          </div>
+        </div>
 
         {/* SETTINGS VIEW */}
         <div
@@ -1390,7 +1414,7 @@ function App() {
             <h2 className="text-sm md:text-base font-medium text-slate-700 uppercase tracking-normal">
               Pengaturan
             </h2>
-                </div>
+          </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 md:gap-4 flex-1 min-h-0">
             <div className="bg-white p-4 sm:p-6 rounded-2xl md:rounded-[3rem] border border-slate-200 shadow-sm flex flex-col">
@@ -1406,7 +1430,7 @@ function App() {
                     <p className="text-slate-400">
                       Ambang bahaya suhu ruangan.
                     </p>
-                </div>
+                  </div>
                   <input
                     id="cfg-temp-threshold"
                     type="number"
@@ -1470,7 +1494,7 @@ function App() {
               >
                 Pengaturan berhasil disimpan.
               </p>
-                </div>
+            </div>
 
             <div className="bg-white p-4 sm:p-6 rounded-2xl md:rounded-[3rem] border border-slate-200 shadow-sm flex flex-col">
               <p className="text-[10px] font-bold text-slate-500 uppercase tracking-[0.25em] mb-4">
@@ -1485,7 +1509,7 @@ function App() {
                     <p className="text-slate-400">
                       Aktifkan / nonaktifkan bunyi alarm saat kondisi kritis.
                     </p>
-                </div>
+                  </div>
                   <label className="inline-flex items-center cursor-pointer">
                     <input
                       id="cfg-alarm-enabled"
@@ -1494,9 +1518,9 @@ function App() {
                     />
                     <div className="w-9 h-5 bg-slate-200 rounded-full peer-checked:bg-emerald-500 relative transition-colors">
                       <div className="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform peer-checked:translate-x-4"></div>
-              </div>
+                    </div>
                   </label>
-        </div>
+                </div>
                 <div className="flex items-center justify-between gap-4">
                   <div>
                     <p className="font-semibold uppercase tracking-[0.2em] text-slate-500 mb-1">
@@ -1505,7 +1529,7 @@ function App() {
                     <p className="text-slate-400">
                       Mengatur tampilan hitung mundur pembaruan (detik).
                     </p>
-      </div>
+                  </div>
                   <input
                     id="cfg-sync-interval"
                     type="number"

@@ -1,6 +1,14 @@
 import { initializeApp } from "firebase/app";
 import { getAnalytics } from "firebase/analytics";
 import { getDatabase, ref, onValue } from "firebase/database";
+import {
+  getAuth,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged,
+  updateProfile,
+} from "firebase/auth";
 
 // Config sama dengan Firebase Console (nilai dari .env)
 const firebaseConfig = {
@@ -18,6 +26,14 @@ const app = initializeApp(firebaseConfig);
 if (typeof window !== "undefined") getAnalytics(app);
 
 export const db = getDatabase(app);
+export const auth = getAuth(app);
+export {
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged,
+  updateProfile,
+};
 
 // 📌 helper untuk realtime listener
 export const listenTelemetry = (callback) => {
