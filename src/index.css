@@ -1,0 +1,151 @@
+/* src/index.css */
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap');
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  /* Cegah zoom tak sengaja di iOS */
+  touch-action: pan-y;
+}
+
+body {
+  margin: 0;
+  font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background-color: #f1f5f9;
+  color: #0f172a;
+  /* Safe area untuk notched devices (iPhone, dll) */
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+/* ─── GLASSMORPHISM UTILITIES (Light Mode) ──────── */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.8);
+}
+
+.glass-card {
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 1);
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+}
+
+/* ─── CHART WRAPPER ─────────────────────────────── */
+.chart-wrapper {
+  position: relative;
+  width: 100%;
+  /* Tinggi minimum responsif: makin besar layar makin tinggi */
+  min-height: 130px;
+  height: 100%;
+}
+
+/* Ponsel kecil < 480px */
+@media (max-width: 479px) {
+  .chart-wrapper { min-height: 120px; }
+}
+
+/* Ponsel 480-639px */
+@media (min-width: 480px) and (max-width: 639px) {
+  .chart-wrapper { min-height: 145px; }
+}
+
+/* Tablet 640-1023px */
+@media (min-width: 640px) and (max-width: 1023px) {
+  .chart-wrapper { min-height: 180px; }
+}
+
+/* Desktop >= 1024px */
+@media (min-width: 1024px) {
+  .chart-wrapper { min-height: 200px; }
+}
+
+/* ─── TOUCH SCROLL ──────────────────────────────── */
+.scroll-touch {
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ─── SAFE AREA ─────────────────────────────────── */
+.safe-area-inset {
+  padding-left:  max(0.75rem, env(safe-area-inset-left));
+  padding-right: max(0.75rem, env(safe-area-inset-right));
+}
+
+/* ─── ACTIVE TAB ────────────────────────────────── */
+.active-tab {
+  background: linear-gradient(135deg, #4f46e5 0%, #3b82f6 100%) !important;
+  color: white !important;
+  box-shadow: 0 10px 15px -3px rgba(79, 70, 229, 0.5);
+  border-color: transparent !important;
+}
+
+/* ─── DANGER PULSE ──────────────────────────────── */
+.danger-pulse {
+  animation: pulse-red 1.5s infinite;
+  border-color: #ef4444 !important;
+}
+
+@keyframes pulse-red {
+  0%   { box-shadow: 0 0 0 0   rgba(239, 68, 68, 0.4); }
+  100% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+}
+
+/* ─── SCROLLBAR TIPIS ───────────────────────────── */
+::-webkit-scrollbar       { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+
+/* ─── RESPONSIVE: SIDEBAR MOBILE ───────────────── */
+/* Pada layar < 768px sidebar menjadi bar horizontal di atas */
+@media (max-width: 767px) {
+  /* Sidebar teks sangat kecil agar muat semua tombol nav */
+  aside nav button span.text-label-full { display: none; }
+
+  /* Card sensor sidebar: 2 kolom kompak */
+  .sidebar-sensor-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+  }
+
+  /* Kurangi padding kartu sensor di mobile */
+  .sensor-card-mobile { padding: 0.5rem 0.75rem !important; }
+}
+
+/* ─── RESPONSIVE: MAIN CONTENT ──────────────────── */
+@media (max-width: 639px) {
+  /* Pada layar sangat kecil, kurangi padding main area */
+  main { padding: 0.5rem !important; gap: 0.5rem !important; }
+
+  /* Tabel histori: font lebih kecil agar muat */
+  #history-table-body td,
+  #view-history thead th {
+    font-size: 8px;
+    padding-right: 0.5rem;
+  }
+}
+
+/* ─── TABEL HISTORI STICKY HEADER ───────────────── */
+#view-history thead {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: white;
+}
+
+/* ─── UTILITY ───────────────────────────────────── */
+@media (min-width: 768px) {
+  .no-scroll-desktop {
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+}
